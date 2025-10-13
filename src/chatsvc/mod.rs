@@ -52,17 +52,17 @@ impl ChatService {
         info!("create user: {:?}", user);
 
         self.users.insert(uid.clone(), user.clone());
-        let chan_id = self.create_chan(uid.clone(), name);
-        info!("user: {} created chan: {}", uid.clone(), chan_id);
+        let chan_id = self.create_chan(uid.clone(), name.clone());
+        info!("user: {} created chan: {}", uid.clone(), chan_id.clone());
 
-        self.send_msg(uid, chan_id, "OK".to_string());
+        self.send_msg(name, chan_id.clone(), "register success".to_string());
     }
 
     pub fn is_user_sub(&self, uid: &String, chan_id: &String) -> bool {
         let user_chans = self.user_chans.get(uid);
         match user_chans {
             Some(chans) => chans.contains(chan_id),
-            None => false
+            None => false,
         }
     }
 
@@ -70,9 +70,6 @@ impl ChatService {
         let chan = Channel::new(name);
 
         let chan_id = chan.id.clone();
-        info!("send OK to chan: {}", chan.id);
-        self.send_msg(uid.clone(), chan_id.clone(), "OK".to_string());
-
         self.channels.insert(chan_id.clone(), chan);
 
         let mut set = HashSet::new();
@@ -85,7 +82,10 @@ impl ChatService {
             })
             .or_insert(set);
 
-        self.send_msg(uid, chan_id.clone(), "channel created".to_string());
+            if let Some(user) = self.users.get(&uid) {
+                    self.send_msg(user.name.clone(), chan_id.clone(), chan_id.clone());
+                }
+        
         chan_id
     }
 
@@ -104,7 +104,13 @@ impl ChatService {
                     })
                     .or_insert(set);
 
-                self.send_msg(uid, chan_id.clone(), "joined channel success".to_string());
+                if let Some(user) = self.users.get(&uid) {
+                    self.send_msg(
+                        user.name.clone(),
+                        chan_id.clone(),
+                        "joined channel success".to_string(),
+                    );
+                }
             }
             None => info!("chan {} not found", chan_id),
         }
@@ -126,16 +132,19 @@ impl ChatService {
         }
     }
 
-    pub fn send_msg(&self, uid: String, chan_id: String, msg: String) {
+    pub fn send_msg(&self, username: String, chan_id: String, msg: String) {
         match self.channels.get(&chan_id) {
             Some(_) => {
-                match self.tx.send(Message::new(uid.clone(), chan_id.clone(), msg)) {
+                match self
+                    .tx
+                    .send(Message::new(username.clone(), chan_id.clone(), msg))
+                {
                     Ok(v) => {
                         info!("success send {} message", v);
-                    },
+                    }
                     Err(e) => warn!("failed to send msg to channel: {}, {}", chan_id, e),
                 }
-                info!("user: {} send msg to: {}", uid, chan_id);
+                info!("user: {} send msg to: {}", username, chan_id);
             }
             None => {
                 info!("chan {} not found", chan_id);
@@ -163,22 +172,17 @@ impl Channel {
 }
 
 impl Message {
-    pub fn new(uid: String, chan_id: String, c: String) -> Self {
+    pub fn new(username: String, chan_id: String, c: String) -> Self {
         Self {
             chan_id,
-            sender: uid,
+            sender: username,
             content: c,
             send_time: Utc::now(),
         }
     }
 
     pub fn to_string(&self) -> String {
-        format!(
-            "{}({}): {}",
-            self.sender,
-            self.send_time.to_string(),
-            self.content
-        )
+        format!("{}: {}", self.sender, self.content)
     }
 }
 
