@@ -1,9 +1,9 @@
 use nanoid::nanoid;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use chrono::Utc;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
 pub struct UserInfo {
@@ -13,6 +13,7 @@ pub struct UserInfo {
 
 #[derive(Debug, Clone)]
 pub struct Message {
+    pub chan_id: String,
     pub sender: String,
     pub content: String,
     pub send_time: chrono::DateTime<Utc>,
@@ -22,111 +23,149 @@ pub struct Message {
 pub struct Channel {
     pub id: String,
     pub name: String,
-    pub sender: broadcast::Sender<Message>,
-    pub online_users: HashMap<String, broadcast::Receiver<Message>>,
+    pub online_users: HashMap<String, ()>,
 }
 
 pub struct ChatService {
+    pub tx: broadcast::Sender<Message>,
     pub users: HashMap<String, UserInfo>,
     pub channels: HashMap<String, Channel>,
+    pub user_chans: HashMap<String, HashSet<String>>,
 }
 
 impl ChatService {
-    pub fn new(cap: usize) -> Self {
+    pub fn new(cap: usize, tx: broadcast::Sender<Message>) -> Self {
         Self {
-            users:HashMap::with_capacity(cap),
+            tx,
+            users: HashMap::with_capacity(cap),
             channels: HashMap::with_capacity(cap),
+            user_chans: HashMap::with_capacity(cap),
         }
     }
 
-    pub fn add_user(&mut self, name: String) -> UserInfo {
-        let uid = gen_id();
+    pub fn add_user(&mut self, name: String, uid: String) {
         let user = UserInfo {
             id: uid.clone(),
-            name,
+            name: name.clone(),
         };
 
-        self.users.insert(uid, user.clone());
-        user
+        info!("create user: {:?}", user);
+
+        self.users.insert(uid.clone(), user.clone());
+        let chan_id = self.create_chan(uid.clone(), name);
+        info!("user: {} created chan: {}", uid.clone(), chan_id);
+
+        self.send_msg(uid, chan_id, "OK".to_string());
     }
 
-    pub fn create_chan(&mut self, _: String, name: String) -> String {
+    pub fn is_user_sub(&self, uid: &String, chan_id: &String) -> bool {
+        let user_chans = self.user_chans.get(uid);
+        match user_chans {
+            Some(chans) => chans.contains(chan_id),
+            None => false
+        }
+    }
+
+    pub fn create_chan(&mut self, uid: String, name: String) -> String {
         let chan = Channel::new(name);
+
         let chan_id = chan.id.clone();
+        info!("send OK to chan: {}", chan.id);
+        self.send_msg(uid.clone(), chan_id.clone(), "OK".to_string());
+
         self.channels.insert(chan_id.clone(), chan);
+
+        let mut set = HashSet::new();
+        set.insert(chan_id.clone());
+
+        self.user_chans
+            .entry(uid.clone())
+            .and_modify(|chans| {
+                chans.insert(chan_id.clone());
+            })
+            .or_insert(set);
+
+        self.send_msg(uid, chan_id.clone(), "channel created".to_string());
         chan_id
     }
 
     pub fn join_chan(&mut self, uid: String, chan_id: String) {
         match self.channels.get_mut(&chan_id) {
-            Some(chan) => chan.join(uid),
+            Some(chan) => {
+                chan.join(uid.clone());
+
+                let mut set = HashSet::new();
+                set.insert(chan_id.clone());
+
+                self.user_chans
+                    .entry(uid.clone())
+                    .and_modify(|chans| {
+                        chans.insert(chan_id.clone());
+                    })
+                    .or_insert(set);
+
+                self.send_msg(uid, chan_id.clone(), "joined channel success".to_string());
+            }
             None => info!("chan {} not found", chan_id),
         }
     }
 
     pub fn leave_chan(&mut self, uid: String, chan_id: String) {
         match self.channels.get_mut(&chan_id) {
-            Some(chan) => chan.leave(uid),
+            Some(chan) => {
+                chan.leave(uid.clone());
+
+                match self.user_chans.get_mut(&uid) {
+                    Some(chans) => {
+                        chans.remove(&chan_id);
+                    }
+                    None => {}
+                }
+            }
             None => info!("chan {} not found", chan_id),
         }
     }
 
-    pub fn send_msg(&mut self, uid: String, chan_id: String, msg: String) -> String {
-        match self.channels.get_mut(&chan_id) {
-            Some(chan) => {
-                chan.send_msg(Message::new(uid.clone(), msg));
+    pub fn send_msg(&self, uid: String, chan_id: String, msg: String) {
+        match self.channels.get(&chan_id) {
+            Some(_) => {
+                match self.tx.send(Message::new(uid.clone(), chan_id.clone(), msg)) {
+                    Ok(v) => {
+                        info!("success send {} message", v);
+                    },
+                    Err(e) => warn!("failed to send msg to channel: {}, {}", chan_id, e),
+                }
                 info!("user: {} send msg to: {}", uid, chan_id);
-                "OK".to_string()
             }
             None => {
                 info!("chan {} not found", chan_id);
-                "ChanNotFound".to_string()
-            },
+            }
         }
     }
 }
 
 impl Channel {
     pub fn new(name: String) -> Self {
-        let (tx, _) = broadcast::channel::<Message>(1000);
         Self {
             id: gen_id(),
             name,
-            sender: tx,
             online_users: HashMap::new(),
         }
     }
 
     pub fn join(&mut self, user_id: String) {
-        let rx = self.sender.clone().subscribe();
-        self.online_users.insert(user_id, rx);
-    }
-
-    pub async fn recv_msg(&mut self, user_id: String) {
-        match self.online_users.get_mut(&user_id) {
-            Some(rx) => while let Ok(msg) = rx.recv().await {
-                //send msg into Tcp connection.
-                info!("sending msg to: {}", user_id);
-            },
-            None => warn!("rx not found"),
-        }
+        self.online_users.insert(user_id, ());
     }
 
     pub fn leave(&mut self, user_id: String) {
         self.online_users.remove(&user_id);
     }
-
-    pub fn send_msg(&mut self, msg: Message) {
-        match self.sender.send(msg) {
-            Ok(_) => info!("success send msg to chan: {}", self.id),
-            Err(e) => warn!("send msg failed: {}", e),
-        }
-    }
 }
 
 impl Message {
-    pub fn new(uid: String, c: String) -> Self {
+    pub fn new(uid: String, chan_id: String, c: String) -> Self {
         Self {
+            chan_id,
             sender: uid,
             content: c,
             send_time: Utc::now(),
@@ -134,7 +173,12 @@ impl Message {
     }
 
     pub fn to_string(&self) -> String {
-        format!("{}({}): {}", self.sender, self.send_time.to_string(), self.content)
+        format!(
+            "{}({}): {}",
+            self.sender,
+            self.send_time.to_string(),
+            self.content
+        )
     }
 }
 

@@ -5,7 +5,7 @@ pub mod handler;
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Register{username: String}, // register${{username}}
+    Register{username: String}, // reg${{username}}
     CreateChan{user_id: String, chan_name: String}, // create_chan$123$MyChat
     JoinChan{user_id: String, chan_id: String}, // join$123$456
     LeaveChan{user_id: String, chan_id: String}, // leave$123$456
@@ -13,16 +13,13 @@ pub enum Event {
     Unknown,
 }
 
-#[derive(Debug, Clone)]
-pub struct EventResp(String);
-
 impl Event {
     pub fn from_string(line: String) -> Result<Self, ChatErrors> {
         let parts: Vec<&str> = line.split("$").into_iter().collect();
         match parts[0] {
-            "register" => {
+            "reg" => {
                 if parts.len() < 2 {
-                    return Err(ChatErrors::InvalidCommand("register need username".to_string()));
+                    return Err(ChatErrors::InvalidCommand("reg need username".to_string()));
                 }
                 Ok(Self::Register { username: parts[1].to_string()})
             }

@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use futures::{SinkExt, StreamExt};
-use tokio::io;
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::io::{self, WriteHalf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{RwLock, broadcast};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{Layer as _, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use txt_chat::chatsvc::Message;
 use txt_chat::{
     chatsvc::ChatService,
     event::{Event, handler::handle_event},
@@ -25,22 +26,36 @@ async fn main() -> anyhow::Result<()> {
 
     info!("server listen on: {}", addr);
 
-    let chat_sevice = Arc::new(RwLock::new(ChatService::new(1000)));
+    let (tx, _) = broadcast::channel::<Message>(1000);
 
-    let svc = Arc::clone(&chat_sevice);
+    let tx1 = tx.clone();
+    let chat_sevice = Arc::new(RwLock::new(ChatService::new(1000, tx)));
 
     loop {
         match listener.accept().await {
             Ok((socket, client_addr)) => {
-                info!("accept conn from: {}", client_addr);
+                info!("accept conn from: {}", client_addr.clone());
 
-                let svc = Arc::clone(&svc);
+                let uid = format!("{:?}", client_addr);
+
+                let svc1 = chat_sevice.clone();
+                let svc2 = chat_sevice.clone();
+                let tx_inner = tx1.clone();
+
                 tokio::spawn(async move {
                     // Split the socket into read and write halves
                     let (reader, writer) = io::split(socket);
 
                     let mut framed_read = FramedRead::new(reader, LinesCodec::new());
                     let mut framed_write = FramedWrite::new(writer, LinesCodec::new());
+
+                    let user_id1 = uid.clone();
+                    let mut rx = tx_inner.subscribe();
+
+                    tokio::spawn(async move {
+                        info!("recv msg for user: {}", user_id1);
+                        recv_msg(svc1, user_id1, &mut rx, &mut framed_write).await;
+                    });
 
                     loop {
                         match framed_read.next().await {
@@ -51,15 +66,8 @@ async fn main() -> anyhow::Result<()> {
                                     let event = Event::from_string(message);
                                     match event {
                                         Ok(ev) => {
-                                            let svc = Arc::clone(&svc);
-                                            let resp = handle_event(svc, ev).await;
-
-                                            let _ = framed_write
-                                                .send(format!("{}", resp))
-                                                .await
-                                                .map_err(|e| {
-                                                    anyhow!("Failed to send response: {}", e)
-                                                });
+                                            info!("handle event: {:?}", ev);
+                                            handle_event(uid.clone(), Arc::clone(&svc2), ev).await;
                                         }
                                         Err(e) => {
                                             warn!("error: {}", e);
@@ -81,5 +89,27 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => warn!("Faield to accept conn: {}", e),
         }
+    }
+}
+
+async fn recv_msg(
+    svc: Arc<RwLock<ChatService>>,
+    uid: String,
+    rx: &mut broadcast::Receiver<Message>,
+    framed_write: &mut FramedWrite<WriteHalf<TcpStream>, LinesCodec>,
+) {
+    
+    while let Ok(msg) = rx.recv().await {
+        let svc = svc.read().await;
+        if !svc.is_user_sub(&uid, &msg.chan_id) {
+            drop(svc);
+            continue;
+        }
+        drop(svc);
+
+        let _ = framed_write
+            .send(msg.to_string())
+            .await
+            .map_err(|e| anyhow!("Failed to send response: {}", e));
     }
 }
