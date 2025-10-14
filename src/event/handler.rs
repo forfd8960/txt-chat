@@ -15,7 +15,7 @@ pub async fn handle_event(uid: String, svc: Arc<RwLock<ChatService>>, event: Eve
             info!("adding user to service");
             svc.add_user(username, uid);
         }
-        Event::CreateChan { user_id, chan_name } => {svc.create_chan(user_id, chan_name);},
+        Event::CreateChan { user_id, chan_name } => {svc.create_chan(user_id, chan_name, None);},
         Event::JoinChan { user_id, chan_id } => svc.join_chan(user_id, chan_id),
         Event::LeaveChan { user_id, chan_id } => svc.leave_chan(user_id, chan_id),
         Event::SendMsg {

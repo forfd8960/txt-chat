@@ -5,6 +5,8 @@ use tracing::{info, warn};
 use chrono::Utc;
 use tokio::sync::broadcast;
 
+const JOIN_RESP: &'static str = "$$joined";
+
 #[derive(Debug, Clone)]
 pub struct UserInfo {
     pub id: String,
@@ -52,10 +54,10 @@ impl ChatService {
         info!("create user: {:?}", user);
 
         self.users.insert(uid.clone(), user.clone());
-        let chan_id = self.create_chan(uid.clone(), name.clone());
+        let chan_id = self.create_chan(uid.clone(), name.clone(), Some(uid.clone()));
         info!("user: {} created chan: {}", uid.clone(), chan_id.clone());
 
-        self.send_msg(name, chan_id.clone(), "register success".to_string());
+        self.send_msg(name, chan_id.clone(), chan_id);
     }
 
     pub fn is_user_sub(&self, uid: &String, chan_id: &String) -> bool {
@@ -66,8 +68,18 @@ impl ChatService {
         }
     }
 
-    pub fn create_chan(&mut self, uid: String, name: String) -> String {
-        let chan = Channel::new(name);
+    pub fn create_chan(
+        &mut self,
+        uid: String,
+        name: String,
+        pre_chan_id: Option<String>,
+    ) -> String {
+        let mut chan = Channel::new(name);
+        let mut not_send = false;
+        if pre_chan_id.is_some() {
+            not_send = true;
+            chan.id = pre_chan_id.unwrap();
+        }
 
         let chan_id = chan.id.clone();
         self.channels.insert(chan_id.clone(), chan);
@@ -82,10 +94,14 @@ impl ChatService {
             })
             .or_insert(set);
 
-            if let Some(user) = self.users.get(&uid) {
-                    self.send_msg(user.name.clone(), chan_id.clone(), chan_id.clone());
-                }
-        
+        if not_send {
+            return chan_id;
+        }
+
+        if let Some(user) = self.users.get(&uid) {
+            self.send_msg(user.name.clone(), chan_id.clone(), chan_id.clone());
+        }
+
         chan_id
     }
 
@@ -108,7 +124,7 @@ impl ChatService {
                     self.send_msg(
                         user.name.clone(),
                         chan_id.clone(),
-                        "joined channel success".to_string(),
+                        format!("{}: {}", JOIN_RESP, chan_id),
                     );
                 }
             }
@@ -182,7 +198,7 @@ impl Message {
     }
 
     pub fn to_string(&self) -> String {
-        format!("{}: {}", self.sender, self.content)
+        format!("{}", self.content)
     }
 }
 
