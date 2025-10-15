@@ -106,6 +106,10 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let user_name = &args[1];
 
+    if let Some(Ok(welcome)) = framed_read.next().await {
+        info!("{}", welcome);
+    }
+
     match framed_write.send(encode_reg(user_name.to_string())).await {
         Ok(_) => {}
         Err(e) => {
