@@ -22,7 +22,7 @@ pub async fn handle_event(uid: String, svc: Arc<RwLock<ChatService>>, event: Eve
             user_id,
             chan_id,
             msg,
-        } => svc.send_msg(user_id, chan_id, msg),
+        } => svc.send_msg(false, user_id, chan_id, msg),
         Event::Unknown => {},
     }
 }

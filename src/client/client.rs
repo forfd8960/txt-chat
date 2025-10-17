@@ -10,14 +10,18 @@ use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{Layer as _, fmt::Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use txt_chat::chatsvc::{CREATE_CHAN_RESP, JOIN_RESP, LEAVE_RESP};
 use txt_chat::errors::ChatErrors;
 
 const JOIN: &'static str = "$join";
-const JOIN_RESP: &'static str = "$$joined";
+const SWITCH: &'static str = "$switch";
+const LEAVE: &'static str = "$leave";
+const CREATE_CHAN: &'static str = "$create_chan";
 
 pub struct ClientState {
     pub user_id: String,
-    pub user_chan: String,    // automic created chan after user register
+    pub username: String,
+    pub user_chan: String,    // automatic created chan after user register
     pub current_chan: String, // current chan id
     pub joined_chans: HashSet<String>,
 }
@@ -26,6 +30,7 @@ impl ClientState {
     pub fn new(user_id: String) -> Self {
         Self {
             user_id,
+            username: "".to_string(),
             user_chan: "".to_string(),
             current_chan: "".to_string(),
             joined_chans: HashSet::new(),
@@ -44,6 +49,7 @@ impl ClientState {
         self.joined_chans.remove(&chan_id);
         if self.current_chan == chan_id {
             self.current_chan = self.user_chan.clone();
+            info!("you have left current chan, switched to your personal chan: {}", self.current_chan);
         }
     }
 
@@ -121,7 +127,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(RwLock::new(ClientState::new(user_id)));
     if let Some(Ok(cur_chan)) = framed_read.next().await {
         let mut state = state.write().await;
-        state.current_chan = cur_chan
+        state.current_chan = cur_chan;
+        state.username = user_name.to_string();
     } else {
         warn!("register user failed");
         return Ok(());
@@ -142,28 +149,50 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    let state = state_clone.read().await;
-                    let (yes, chan_id) = match is_join(line.clone()) {
-                        Ok((yes, chan_id)) => (yes, chan_id),
-                        Err(e) => {
-                            warn!("error: {}", e);
-                            (false, "".to_string())
+                    if let Ok(Some(chan_id)) = check_switch_chan(line.clone()) {
+                        let mut state = state_clone.write().await;
+                        if !state.joined_chans.contains(&chan_id) {
+                            warn!("you have not joined chan: {}, please join it first", chan_id);
+                            continue;
                         }
-                    };
 
-                    if yes {
-                        let msg = encode_join(&state, chan_id);
+                        state.switch_chan(chan_id.clone());
+                        continue;
+                    }
+
+                    let state = state_clone.read().await;
+
+                    if let Ok(Some(msg)) = check_leave_cmd_and_encode_msg(line.clone(), &state) {
+                        if framed_write.send(msg).await.is_err() {
+                            warn!("Failed to send line");
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if let Ok(Some(msg)) = check_join_cmd_and_encode_msg(line.clone(), &state) {
+                        if framed_write.send(msg).await.is_err() {
+                            warn!("Failed to send line");
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if let Ok(Some(msg)) = check_create_chan_cmd_and_encode_msg(line.clone(), &state) {
+                        if framed_write.send(msg).await.is_err() {
+                            warn!("Failed to send line");
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if let Ok(msg) = encode_send_msg(&state, line) {
                         if framed_write.send(msg).await.is_err() {
                             warn!("Failed to send line");
                             break;
                         }
                     } else {
-                        if let Ok(msg) = encode_send_msg(&state, line) {
-                            if framed_write.send(msg).await.is_err() {
-                                warn!("Failed to send line");
-                                break;
-                            }
-                        }
+                        warn!("you have not set current chan yet, please join a chan first");
                     }
                 }
                 Ok(None) | Err(_) => break,
@@ -189,6 +218,15 @@ async fn main() -> Result<()> {
                 if let Ok(joined_chan) = parse_join_resp(&line) {
                     state.switch_chan(joined_chan);
                 }
+
+                if let Ok(leaved_chan) = parse_leave_resp(&line) {
+                    state.leave_chan(leaved_chan);
+                }
+
+                if let Ok(created_chan) = parse_create_chan_resp(&line) {
+                    state.append_chan(created_chan.clone());
+                    info!("created chan: {} and joined it", created_chan);
+                }
             }
             Err(e) => {
                 eprintln!("Error reading line: {}", e);
@@ -206,12 +244,112 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn check_switch_chan(
+    line: String,
+) -> Result<Option<String>, String> {
+    if line.starts_with("$") {
+        let parts: Vec<&str> = line.split(" ").collect();
+        if parts[0] == SWITCH {
+            if parts.len() < 2 {
+                return Err("switch need chan_id".to_string());
+            }
+
+            let chan_id = parts[1].to_string();
+            if chan_id.is_empty() {
+                return Err("chan_id is empty".to_string());
+            }
+            return Ok(Some(chan_id));
+        }
+        Ok(None)
+    } else {
+        Ok(None)
+    }
+}
+
+fn check_leave_cmd_and_encode_msg(
+    line: String,
+    state: &ClientState,
+) -> Result<Option<String>, String> {
+    match is_leave(line) {
+        Ok((yes, chan_id)) => {
+            if yes {
+                if chan_id.is_empty() {
+                    return Err("chan_id is empty".to_string());
+                }
+
+                if !state.joined_chans.contains(&chan_id) {
+                    return Err(format!("you have not joined chan: {}", chan_id));
+                }
+
+                return Ok(Some(encode_leave(state, chan_id)));
+            }
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn check_join_cmd_and_encode_msg(
+    line: String,
+    state: &ClientState,
+) -> Result<Option<String>, String> {
+    match is_join(line) {
+        Ok((yes, chan_id)) => {
+            if yes {
+                if chan_id.is_empty() {
+                    return Err("chan_id is empty".to_string());
+                }
+
+                if state.joined_chans.contains(&chan_id) {
+                    return Err(format!("you have already joined chan: {}", chan_id));
+                }
+
+                return Ok(Some(encode_join(state, chan_id)));
+            }
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn check_create_chan_cmd_and_encode_msg(
+    line: String,
+    state: &ClientState,
+) -> Result<Option<String>, String> {
+    if line.starts_with(CREATE_CHAN) {
+        let parts: Vec<&str> = line.split(" ").collect();
+        if parts.len() < 2 {
+            return Err("create_chan need chan_name".to_string());
+        }
+
+        return Ok(Some(encode_create_chan(state, parts[1].to_string())));
+    } else {
+        Ok(None)
+    }
+}
+
 fn is_join(line: String) -> Result<(bool, String), String> {
     if line.starts_with("$") {
         let parts: Vec<&str> = line.split(" ").collect();
         if parts[0] == JOIN {
             if parts.len() < 2 {
                 return Err("join need chan_id".to_string());
+            }
+
+            return Ok((true, parts[1].to_string()));
+        }
+        Ok((false, "".to_string()))
+    } else {
+        Ok((false, "".to_string()))
+    }
+}
+
+fn is_leave(line: String) -> Result<(bool, String), String> {
+    if line.starts_with("$") {
+        let parts: Vec<&str> = line.split(" ").collect();
+        if parts[0] == LEAVE {
+            if parts.len() < 2 {
+                return Err("leave need chan_id".to_string());
             }
 
             return Ok((true, parts[1].to_string()));
@@ -233,4 +371,30 @@ fn parse_join_resp(line: &String) -> Result<String, String> {
     }
 
     Err("not join resp".to_string())
+}
+
+fn parse_leave_resp(line: &String) -> Result<String, String> {
+    let parts: Vec<&str> = line.split(": ").collect();
+    if parts.len() < 2 {
+        return Err("invalid leave resp".to_string());
+    }
+
+    if line.starts_with("$$") && parts[0] == LEAVE_RESP {
+        return Ok(parts[1].to_string());
+    }
+
+    Err("not leave resp".to_string())
+}
+
+fn parse_create_chan_resp(line: &String) -> Result<String, String> {
+    let parts: Vec<&str> = line.split(": ").collect();
+    if parts.len() < 2 {
+        return Err("invalid create_chan resp".to_string());
+    }
+
+    if line.starts_with("$$") && parts[0] == CREATE_CHAN_RESP {
+        return Ok(parts[1].to_string());
+    }
+
+    Err("not create_chan resp".to_string())
 }

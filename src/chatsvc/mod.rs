@@ -5,7 +5,9 @@ use tracing::{info, warn};
 use chrono::Utc;
 use tokio::sync::broadcast;
 
-const JOIN_RESP: &'static str = "$$joined";
+pub const JOIN_RESP: &'static str = "$$joined";
+pub const LEAVE_RESP: &'static str = "$$leaved";
+pub const CREATE_CHAN_RESP: &'static str = "$$create_chan";
 
 #[derive(Debug, Clone)]
 pub struct UserInfo {
@@ -57,7 +59,7 @@ impl ChatService {
         let chan_id = self.create_chan(uid.clone(), name.clone(), Some(uid.clone()));
         info!("user: {} created chan: {}", uid.clone(), chan_id.clone());
 
-        self.send_msg(name, chan_id.clone(), chan_id);
+        self.send_msg(true, name, chan_id.clone(), chan_id);
     }
 
     pub fn is_user_sub(&self, uid: &String, chan_id: &String) -> bool {
@@ -99,7 +101,7 @@ impl ChatService {
         }
 
         if let Some(user) = self.users.get(&uid) {
-            self.send_msg(user.name.clone(), chan_id.clone(), chan_id.clone());
+            self.send_msg(true, user.name.clone(), chan_id.clone(), format!("{}: {}", CREATE_CHAN_RESP, chan_id));
         }
 
         chan_id
@@ -122,6 +124,7 @@ impl ChatService {
 
                 if let Some(user) = self.users.get(&uid) {
                     self.send_msg(
+                        true,
                         user.name.clone(),
                         chan_id.clone(),
                         format!("{}: {}", JOIN_RESP, chan_id),
@@ -143,14 +146,31 @@ impl ChatService {
                     }
                     None => {}
                 }
+
+                if let Some(user) = self.users.get(&uid) {
+                    self.send_msg(
+                        true, 
+                        user.name.clone(),
+                        chan_id.clone(),
+                        format!("{}: {}", LEAVE_RESP, chan_id),
+                    );
+                }
+
+                info!("user: {} leave chan: {}", uid, chan_id);
             }
             None => info!("chan {} not found", chan_id),
         }
     }
 
-    pub fn send_msg(&self, username: String, chan_id: String, msg: String) {
+    pub fn send_msg(&self, is_cmd: bool, username: String, chan_id: String, msg: String) {
         match self.channels.get(&chan_id) {
             Some(_) => {
+                let msg = if is_cmd {
+                    msg
+                } else {
+                    format!("{}: {}", username, msg)
+                };
+
                 match self
                     .tx
                     .send(Message::new(username.clone(), chan_id.clone(), msg))
